@@ -17,6 +17,7 @@ import java.awt.event.MouseListener;
 import java.awt.event.MouseMotionListener;
 import java.awt.geom.AffineTransform;
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.Timer;
@@ -24,12 +25,14 @@ import javax.swing.Timer;
 public abstract
 class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 {
+	private static final long EXPERT_COMPLETION_TIME_MS = TimeUnit.SECONDS.toMillis(2);
+
 	/**
 	 * @param args the command line arguments
 	 */
 	private Gesture[] menuItems;
 	private Point     center, currPos;
-	private int              mode;// 0-no mode, 1- novice mode, 2-expert mode, 3-feedback mode
+	private MarkingMode      mode;
 	private ArrayList<Point> inputGesture;
 	private Bezier           bentCurve, cuspedCurve, pigtailCurve, straight;
 	private int radius, noOfItems, selecteddirection, selectedgesture;
@@ -92,37 +95,50 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 		}
 		selecteddirection = -1;
 		selectedgesture = -1;
-		radius = 10;
-		mode = 2; //set to expert mode
+		radius = 30;
+		mode = MarkingMode.EXPERT;
 		center = new Point(-1, -1);
 		currPos = new Point();
-		feedbackTimer = new Timer(500, new ActionListener()
+
+		//feedbackTimer displays the 'after image' of their selection.
+		feedbackTimer = new Timer(800, new ActionListener()
 		{
 			@Override
 			public
 			void actionPerformed(ActionEvent e)
 			{
-				mode = 0;
+				mode = MarkingMode.NONE;
 				repaint();
 				feedbackTimer.stop();
 			}
 		});
 		feedbackTimer.setInitialDelay(400);
+
+		//mouseTimer is in case they don't start dragging.
 		mouseTimer = new Timer(600, new ActionListener()
 		{
 			@Override
 			public
 			void actionPerformed(ActionEvent e)
 			{
+				System.err.println("mouseTimer fired");
 				if (((currPos.x - center.x) * (currPos.x - center.x) + (currPos.y - center.y) * (currPos.y - center.y)) < radius * radius)
 				{
-					mode = 1;//novice mode set
+					mode = MarkingMode.NOVICE;
+					repaint();
+					mouseTimer.stop();
 				}
-				repaint();
-				mouseTimer.stop();
+				else
+				if (dragIsTakingTooLong())
+				{
+					mode = MarkingMode.NOVICE;
+					selecteddirection=whichDirection();
+					repaint();
+				}
 			}
 		});
 		mouseTimer.setInitialDelay(400);
+
 		setLayout(null);
 		addMouseListener(this);
 		addMouseMotionListener(this);
@@ -132,18 +148,23 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 	void paintComponent(Graphics g)
 	{
 		super.paintComponent(g);
-		if (mode == 0)
+
+		//???: Isn't this just another way of setting the starting mode to expert?
+		if (mode == MarkingMode.NONE)
 		{
 			this.removeAll();
-			mode = 2;
+			mode = MarkingMode.EXPERT;
 		}
-		if (mode == 1)//Novice
+
+		if (mode == MarkingMode.NOVICE)
 		{
 			g.setColor(Color.black);
 			((Graphics2D) g).setStroke(new BasicStroke(1));
+
 			for (int i = 0; i < 8; i++)
 			{
 				boolean flag = false;
+
 				for (int j = 0; j < 7; j++)
 				{
 					if (idMap[i * 7 + j] != -1)
@@ -152,7 +173,8 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 						break;
 					}
 				}
-				if (flag == true)
+
+				if (flag)
 				{
 					//    ((Graphics2D)g).rotate(Math.toRadians(i*45),center.x,center.y);
 					//    g.drawLine(center.x,center.y,center.x,(int)straight.curvePoints.get(straight.curvePoints.size()-1).y-offset[i]+ center.y);
@@ -160,8 +182,10 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 					this.add(groupLabels[i]);
 				}
 			}
+
 			if (selecteddirection != -1)
 			{
+				//Draw the sub-labels.
 				for (int j = 0; j < 7; j++)
 				{
 					if (idMap[selecteddirection * 7 + j] != -1)
@@ -180,7 +204,7 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 				}
 			}
 			validate();
-			g.setColor(Color.RED);
+			g.setColor(Color.BLUE);
 			((Graphics2D) g).setStroke(new BasicStroke(3));
 			for (int k = 0; k < inputGesture.size() - 1; k++)
 			{
@@ -193,7 +217,8 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 			((Graphics2D) g).setStroke(new BasicStroke(2));
 			g.drawOval(center.x - radius, center.y - radius, 2 * radius, 2 * radius);
 		}
-		if (mode == 2)//Expert
+
+		if (mode == MarkingMode.EXPERT)
 		{
 			g.setColor(Color.RED);
 			((Graphics2D) g).setStroke(new BasicStroke(3));
@@ -211,7 +236,8 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 				g.drawOval(center.x - radius, center.y - radius, 2 * radius, 2 * radius);
 			}
 		}
-		if (mode == 3)//Feedback
+
+		if (mode == MarkingMode.FEEDBACK)
 		{
 			if (selecteddirection != -1 && selectedgesture != -1)
 			{
@@ -230,22 +256,29 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 				}
 				validate();
 				feedbackTimer.start();
+				mouseTimer.stop();
 				decideCallback();
 				selecteddirection = -1;
 				selectedgesture = -1;
 			}
 			else
 			{
-				mode = 2;
+				mode = MarkingMode.EXPERT;
 				this.removeAll();
 			}
 		}
 	}
 
+	private
+	long mousePressedTime;
+
 	public
 	void mousePressed(MouseEvent e)
 	{
 		//Invoked when a mouse button has been pressed on a component.
+		mousePressedTime=System.currentTimeMillis();
+
+		selecteddirection = -1;
 		center = e.getPoint();
 		inputGesture.add(center);
 		currPos = center;
@@ -535,7 +568,7 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 			}
 			selectedgesture = gestureId;
 		}
-		mode = 3;
+		mode = MarkingMode.FEEDBACK;
 		inputGesture.removeAll(inputGesture);
 		this.removeAll();
 		repaint();
@@ -557,97 +590,113 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 	{
 		currPos = e.getPoint();
 
-		if (mode == 1 || mode == 2)
+		if (mode == MarkingMode.NOVICE || mode == MarkingMode.EXPERT)
 		{
+			if (mode==MarkingMode.EXPERT && dragIsTakingTooLong())
+			{
+				System.err.println("dragIsTakingTooLong() -> NOVICE");
+				mode=MarkingMode.NOVICE;
+			}
+
 			if (((currPos.x - center.x) * (currPos.x - center.x) + (currPos.y - center.y) * (currPos.y - center.y)) >= radius * radius)
 			{
 				inputGesture.add(currPos);
-				if (inputGesture.size() == 8 && mode == 1)
+
+				if (mode==MarkingMode.NOVICE)
 				{
-					selecteddirection = whichDirection();
-				}
-				if (inputGesture.size() > 8 && mode == 1)
-				{
-					Point[] nGest = inputGesture.toArray(new Point[inputGesture.size()]);
-					double[] distances = new double[7];
-					distances[0] = DTWDistance(normalize(reSampling(nGest, pigtailCurve.curvePoints.size()),
-															pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						true)),
-												  normalize(pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						true),
-															   pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						   true)));
-					//   distances[0] = LinearDistance(reSampling(normalize(nGest, pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),pigtailCurve.curvePoints.size()),normalize(pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true),pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));;
-					distances[1] = DTWDistance(normalize(reSampling(nGest, cuspedCurve.curvePoints.size()),
-															cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					   true)),
-												  normalize(cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					   true),
-															   cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						  true)));
-					//    distances[1] = LinearDistance(reSampling(normalize(nGest, cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),cuspedCurve.curvePoints.size()),normalize(cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true),cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));
-					distances[2] = DTWDistance(normalize(reSampling(nGest, bentCurve.curvePoints.size()),
-															bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					 true)),
-												  normalize(bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					 true),
-															   bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						true)));
-					//   distances[2] = LinearDistance(reSampling(normalize(nGest, bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),bentCurve.curvePoints.size()), normalize(bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true),bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));
-					distances[3] = DTWDistance(normalize(reSampling(nGest, straight.curvePoints.size()),
-															straight.getPointInt(Math.toRadians(45 * selecteddirection),
-																					false)),
-												  normalize(straight.getPointInt(Math.toRadians(45 * selecteddirection),
-																					false),
-															   straight.getPointInt(Math.toRadians(45 * selecteddirection),
-																					   false)));
-					//   distances[3] = LinearDistance(reSampling(normalize(nGest, straight.getPointInt(Math.toRadians(45*selecteddirection),false)),straight.curvePoints.size()), reSampling(normalize(straight.getPointInt(Math.toRadians(45*selecteddirection),false),straight.getPointInt(Math.toRadians(45*selecteddirection),false)),straight.curvePoints.size()));
-					distances[4] = DTWDistance(normalize(reSampling(nGest, bentCurve.curvePoints.size()),
-															bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					 false)),
-												  normalize(bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					 false),
-															   bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						false)));
-					//   distances[4] = LinearDistance(reSampling(normalize(nGest, bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),bentCurve.curvePoints.size()), normalize(bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false),bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
-					distances[5] = DTWDistance(normalize(reSampling(nGest, cuspedCurve.curvePoints.size()),
-															cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					   false)),
-												  normalize(cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																					   false),
-															   cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						  false)));
-					//  distances[5] = LinearDistance(reSampling(normalize(nGest, cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),cuspedCurve.curvePoints.size()),normalize(cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false),cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
-					distances[6] = DTWDistance(normalize(reSampling(nGest, pigtailCurve.curvePoints.size()),
-															pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						false)),
-												  normalize(pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						false),
-															   pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
-																						   false)));
-					//  distances[6] = LinearDistance(reSampling(normalize(nGest, pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),pigtailCurve.curvePoints.size()),normalize(pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false),pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
-					double min = Double.POSITIVE_INFINITY;
-					int gestureId = -1;
-					for (int i = 0; i < distances.length; i++)
+					if (inputGesture.size() == 8)
 					{
-						if (min > distances[i])
-						{
-							min = distances[i];
-							gestureId = i;
-						}
+						selecteddirection = whichDirection();
 					}
-					selectedgesture = gestureId;
+
+					if (inputGesture.size() > 8)
+					{
+						Point[] nGest = inputGesture.toArray(new Point[inputGesture.size()]);
+						double[] distances = new double[7];
+						distances[0] = DTWDistance(normalize(reSampling(nGest, pigtailCurve.curvePoints.size()),
+																pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							true)),
+													  normalize(pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							true),
+																   pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							   true)));
+						//   distances[0] = LinearDistance(reSampling(normalize(nGest, pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),pigtailCurve.curvePoints.size()),normalize(pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true),pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));;
+						distances[1] = DTWDistance(normalize(reSampling(nGest, cuspedCurve.curvePoints.size()),
+																cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						   true)),
+													  normalize(cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						   true),
+																   cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							  true)));
+						//    distances[1] = LinearDistance(reSampling(normalize(nGest, cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),cuspedCurve.curvePoints.size()),normalize(cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true),cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));
+						distances[2] = DTWDistance(normalize(reSampling(nGest, bentCurve.curvePoints.size()),
+																bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						 true)),
+													  normalize(bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						 true),
+																   bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							true)));
+						//   distances[2] = LinearDistance(reSampling(normalize(nGest, bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true)),bentCurve.curvePoints.size()), normalize(bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true),bentCurve.getPointInt(Math.toRadians(45*selecteddirection),true)));
+						distances[3] = DTWDistance(normalize(reSampling(nGest, straight.curvePoints.size()),
+																straight.getPointInt(Math.toRadians(45 * selecteddirection),
+																						false)),
+													  normalize(straight.getPointInt(Math.toRadians(45 * selecteddirection),
+																						false),
+																   straight.getPointInt(Math.toRadians(45 * selecteddirection),
+																						   false)));
+						//   distances[3] = LinearDistance(reSampling(normalize(nGest, straight.getPointInt(Math.toRadians(45*selecteddirection),false)),straight.curvePoints.size()), reSampling(normalize(straight.getPointInt(Math.toRadians(45*selecteddirection),false),straight.getPointInt(Math.toRadians(45*selecteddirection),false)),straight.curvePoints.size()));
+						distances[4] = DTWDistance(normalize(reSampling(nGest, bentCurve.curvePoints.size()),
+																bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						 false)),
+													  normalize(bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						 false),
+																   bentCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							false)));
+						//   distances[4] = LinearDistance(reSampling(normalize(nGest, bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),bentCurve.curvePoints.size()), normalize(bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false),bentCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
+						distances[5] = DTWDistance(normalize(reSampling(nGest, cuspedCurve.curvePoints.size()),
+																cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						   false)),
+													  normalize(cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																						   false),
+																   cuspedCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							  false)));
+						//  distances[5] = LinearDistance(reSampling(normalize(nGest, cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),cuspedCurve.curvePoints.size()),normalize(cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false),cuspedCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
+						distances[6] = DTWDistance(normalize(reSampling(nGest, pigtailCurve.curvePoints.size()),
+																pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							false)),
+													  normalize(pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							false),
+																   pigtailCurve.getPointInt(Math.toRadians(45 * selecteddirection),
+																							   false)));
+						//  distances[6] = LinearDistance(reSampling(normalize(nGest, pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false)),pigtailCurve.curvePoints.size()),normalize(pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false),pigtailCurve.getPointInt(Math.toRadians(45*selecteddirection),false)));
+						double min = Double.POSITIVE_INFINITY;
+						int gestureId = -1;
+						for (int i = 0; i < distances.length; i++)
+						{
+							if (min > distances[i])
+							{
+								min = distances[i];
+								gestureId = i;
+							}
+						}
+						selectedgesture = gestureId;
+					}
 				}
 
 			}
 			else
 			{
-				if (mode == 2)
+				//They have returned to (or not left) the safety of the 'center bubble'.
+				if (mode == MarkingMode.EXPERT)
 				{
 					mouseTimer.start();
 				}
+				else
+				{
+					selecteddirection = -1;
+				}
+
 				inputGesture.removeAll(inputGesture);
-				selecteddirection = -1;
 				selectedgesture = -1;
 				inputGesture.add(center);
 				this.removeAll();
@@ -655,6 +704,12 @@ class MenusPanel extends JPanel implements MouseListener, MouseMotionListener
 			}
 		}
 		repaint();
+	}
+
+	private
+	boolean dragIsTakingTooLong()
+	{
+		return mousePressedTime + EXPERT_COMPLETION_TIME_MS < System.currentTimeMillis();
 	}
 
 	public
